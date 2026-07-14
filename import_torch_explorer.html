@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Import-Torch Copper Explorer</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#1a2129; --line:#2b3540; --grid:#1f2730;
+    --ink:#e6edf3; --dim:#8b98a5;
+    --copper-cold:#e07b39;
+    --copper-warm:#f2c078;
+    --lustre-cold:#3d7fd6;
+    --lustre-warm:#8fc0f0;
+    --reg:#5ec27e;
+    --rpc:#b98fd6;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;padding:22px;background:var(--bg);color:var(--ink);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}
+  h1{font-size:19px;margin:0 0 2px;}
+  .sub{color:var(--dim);font-size:12px;margin:0 0 16px;}
+  .controls{display:flex;flex-wrap:wrap;gap:16px;align-items:center;
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    padding:12px 16px;margin-bottom:16px;}
+  .ctl{display:flex;flex-direction:column;gap:4px;}
+  .ctl label{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;}
+  select,button{background:#0c1116;border:1px solid var(--line);color:var(--ink);
+    border-radius:5px;padding:5px 9px;font-size:13px;}
+  button{cursor:pointer;}
+  button:hover{border-color:var(--reg);}
+  .series-toggles{display:flex;flex-wrap:wrap;gap:10px;}
+  .chip{display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;
+    padding:4px 8px;border:1px solid var(--line);border-radius:5px;background:#0c1116;user-select:none;}
+  .chip.off{opacity:.35;}
+  .sw{width:11px;height:11px;border-radius:2px;}
+  .chart-wrap{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    padding:14px;margin-bottom:16px;}
+  svg{width:100%;max-width:960px;display:block;}
+  .tt{position:fixed;pointer-events:none;background:#0c1116;border:1px solid var(--line);
+    border-radius:6px;padding:6px 9px;font-size:12px;color:var(--ink);opacity:0;transition:opacity .08s;z-index:10;}
+  table{border-collapse:collapse;width:100%;max-width:960px;font-size:12px;margin-top:6px;}
+  th,td{border:1px solid var(--line);padding:4px 8px;text-align:right;}
+  th{background:var(--panel);color:var(--dim);}
+  td.l,th.l{text-align:left;}
+  details{margin-top:10px;}
+  summary{cursor:pointer;color:var(--dim);font-size:13px;}
+  textarea{width:100%;max-width:960px;height:120px;background:#0c1116;border:1px solid var(--line);
+    color:var(--ink);border-radius:6px;padding:8px;font-family:ui-monospace,monospace;font-size:11px;margin-top:8px;}
+  .note{color:var(--dim);font-size:11px;margin-top:6px;}
+</style>
+</head>
+<body>
+  <h1>Import-Torch Copper Explorer</h1>
+  <p class="sub">Scatter (all reps) + median line. Log-x on node count. Cold contamination is one-directional (only makes runs faster), so the <b>upper</b> edge of cold scatter is the truest-cold signal.</p>
+
+  <div class="controls">
+    <div class="ctl">
+      <label>Metric</label>
+      <select id="metric">
+        <option value="import">Import time (cold &amp; warm)</option>
+        <option value="reg">Registration (Copper only)</option>
+        <option value="rpc">First RPC (Copper only)</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label>Y axis</label>
+      <select id="yscale">
+        <option value="linear">Linear</option>
+        <option value="log">Log</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label>Cold aggregate line</label>
+      <select id="coldagg">
+        <option value="median">Median</option>
+        <option value="max">Max (least-contaminated)</option>
+      </select>
+    </div>
+    <div class="ctl" style="flex:1;">
+      <label>Series</label>
+      <div class="series-toggles" id="toggles"></div>
+    </div>
+  </div>
+
+  <div class="chart-wrap">
+    <svg id="chart" viewBox="0 0 960 460"></svg>
+  </div>
+
+  <div class="chart-wrap">
+    <div class="l" style="color:var(--dim);font-size:12px;margin-bottom:6px;">Summary (median across reps, per cell)</div>
+    <table id="summary"></table>
+  </div>
+
+  <details>
+    <summary>Add / replace data (paste tab- or comma-separated rows)</summary>
+    <div class="note">Columns: nodes, ranks, copper(Yes/No), jobid, timestamp, import_cold, import_warm, reg_min, reg_median, reg_max, rpc_min, rpc_median, rpc_max. Paste and click Load. "null" allowed for no-copper reg/rpc.</div>
+    <textarea id="pastebox" placeholder="2	24	Yes	8555497	2026-06-22 15:34:55	51.83	12.90	0.091	0.096	0.101	10.274	10.274	10.274"></textarea>
+    <button id="loadbtn">Load pasted rows (append)</button>
+    <button id="replacebtn">Replace all with pasted</button>
+  </details>
+
+<div class="tt" id="tt"></div>
+
+<script>
+// ---- embedded data ----
+const RAW = `
+2	24	Yes	8555689	t	34.01	12.87	0.083	0.085	0.087	10.25	10.25	10.25
+2	24	Yes	8555497	t	51.83	12.9	0.091	0.096	0.101	10.274	10.274	10.274
+2	24	Yes	8555606	t	53.98	12.9	0.081	0.193	0.304	10.266	10.266	10.266
+2	24	Yes	8555543	t	55.63	12.91	0.084	0.088	0.091	10.261	10.261	10.261
+2	24	Yes	8555591	t	15.2	12.97	0.085	0.087	0.088	10.24	10.24	10.24
+2	24	Yes	8555561	t	52.19	12.99	0.086	0.111	0.136	10.442	10.442	10.442
+4	48	Yes	8641292	t	68.48	8.58	0.079	0.132	0.143	10.437	10.45	10.475
+4	48	Yes	8555705	t	58.85	12.95	0.082	0.087	0.094	10.302	10.306	10.31
+4	48	Yes	8555734	t	56.59	13.32	0.086	0.102	0.242	10.272	10.366	10.386
+8	96	Yes	8600389	t	52.66	12.96	0.082	0.087	0.163	10.604	10.709	10.85
+8	96	Yes	8601585	t	48.34	13.26	0.082	0.086	0.105	10.299	10.541	10.725
+8	96	Yes	8599645	t	51.98	13.45	0.08	0.084	0.221	10.632	10.686	10.743
+8	96	Yes	8596192	t	221.04	13.79	0.082	0.084	0.087	10.384	10.744	10.94
+16	192	Yes	8602054	t	65.32	12.9	0.081	0.086	0.098	10.474	10.789	10.918
+16	192	Yes	8602723	t	61.86	12.93	0.087	0.099	0.144	10.613	10.841	10.969
+16	192	Yes	8603208	t	69.1	27.92	0.762	1.037	1.066	10.375	10.718	10.771
+32	384	Yes	8640426	t	47.21	14.64	0.081	0.09	0.224	10.322	10.57	10.826
+32	384	Yes	8640453	t	43.86	15.35	0.081	0.085	0.094	10.29	10.5	10.579
+32	384	Yes	8640491	t	50.79	16.81	0.08	0.084	0.119	10.266	10.501	10.698
+32	384	Yes	8640513	t	50.41	17.29	0.081	0.084	0.192	10.307	10.563	10.834
+64	768	Yes	8640581	t	58.87	13.17	0.08	0.085	0.186	10.349	10.696	11.05
+64	768	Yes	8640709	t	78.25	13.42	0.081	0.085	0.131	10.28	10.57	10.785
+64	768	Yes	8640556	t	45.75	13.51	0.082	0.086	0.115	10.466	10.927	11.457
+64	768	Yes	8640746	t	73.4	14.21	0.083	0.087	0.175	10.284	10.504	10.823
+64	768	Yes	8640731	t	33.5	14.53	0.078	0.083	0.111	10.263	10.295	10.344
+128	1536	Yes	8640943	t	54.15	13.3	0.081	0.086	0.272	10.304	11.097	11.564
+128	1536	Yes	8640838	t	125.72	74.86	0.091	0.117	0.19	10.357	11.164	11.731
+2	24	No	8586105	t	64.14	6.68	null	null	null	null	null	null
+2	24	No	8585107	t	34.02	24.52	null	null	null	null	null	null
+4	48	No	8591113	t	32.91	4.45	null	null	null	null	null	null
+4	48	No	8595803	t	35.03	4.56	null	null	null	null	null	null
+4	48	No	8595423	t	34.36	4.88	null	null	null	null	null	null
+8	96	No	8640255	t	31.77	4.23	null	null	null	null	null	null
+8	96	No	8596729	t	34.55	6.47	null	null	null	null	null	null
+8	96	No	8638873	t	51.13	9.89	null	null	null	null	null	null
+16	192	No	8638510	t	36.16	4.87	null	null	null	null	null	null
+16	192	No	8603810	t	36.57	4.95	null	null	null	null	null	null
+16	192	No	8638796	t	58.35	12.65	null	null	null	null	null	null
+16	192	No	8638830	t	80.07	16.63	null	null	null	null	null	null
+32	384	No	8640394	t	32.31	6.03	null	null	null	null	null	null
+32	384	No	8640366	t	66.38	6.31	null	null	null	null	null	null
+32	384	No	8640289	t	33.01	6.7	null	null	null	null	null	null
+32	384	No	8640331	t	30.74	8.36	null	null	null	null	null	null
+64	768	No	8640680	t	8.47	8.26	null	null	null	null	null	null
+64	768	No	8640692	t	38.34	9.29	null	null	null	null	null	null
+64	768	No	8640648	t	93.28	10.54	null	null	null	null	null	null
+64	768	No	8640665	t	21.59	14.82	null	null	null	null	null	null
+64	768	No	8640602	t	533.83	34.22	null	null	null	null	null	null
+128	1536	No	8640824	t	42.12	15.15	null	null	null	null	null	null
+128	1536	No	8640793	t	29.2	16.56	null	null	null	null	null	null
+128	1536	No	8640768	t	48.92	17.01	null	null	null	null	null	null
+256,3072,No,8659396,2026-07-09 17:40:44,60.98,26.88,null,null,null,null,null,null
+256,3072,Yes,8659856,2026-07-09 18:43:55,164.64,78.19,0.085,0.115,0.223,10.379,11.661,13.084
+512	6144	Yes	8659953	2026-07-09 19:14:02	76.81	11.39	0.086	0.125	0.49	10.386	13.43	15.999
+512	6144	No	8660011	2026-07-09 19:33:29	83.13	47.93	null	null	null	null	null	null
+1024	12288	Yes	8663160	2026-07-10 22:46:25	106.75	32.02	0.09	0.142	0.292	10.518	17.409	23.731
+1024	12288	Yes	8670246	2026-07-14 14:13:02	74.69	15.28	0.089	0.095	0.272	10.535	16.506	22.232
+1024	12288	No	8669335	2026-07-12 22:59:09	130.65	88.25	null	null	null	null	null
+1024	12288	No	8670958	2026-07-14 14:47:09	125.81	83.22	null	null	null	null	null
+`.trim();
+
+let DATA = [];
+function parseRows(text){
+  const out=[];
+  text.trim().split('\n').forEach(line=>{
+    if(!line.trim())return;
+    const p=line.split(/[\t,]/).map(s=>s.trim());
+    if(p.length<7)return;
+    const num=v=>(v==='null'||v===''||v==null)?null:parseFloat(v);
+    out.push({
+      nodes:+p[0], ranks:+p[1], copper:p[2],
+      import_cold:num(p[5]), import_warm:num(p[6]),
+      reg_min:num(p[7]), reg_median:num(p[8]), reg_max:num(p[9]),
+      rpc_min:num(p[10]), rpc_median:num(p[11]), rpc_max:num(p[12]),
+    });
+  });
+  return out;
+}
+DATA = parseRows(RAW);
+
+// ---- series definitions ----
+const SERIES = {
+  import: [
+    {key:'copper_cold', label:'Copper cold', color:'var(--copper-cold)', copper:'Yes', field:'import_cold', cold:true},
+    {key:'copper_warm', label:'Copper warm', color:'var(--copper-warm)', copper:'Yes', field:'import_warm', cold:false},
+    {key:'lustre_cold', label:'No-Copper cold', color:'var(--lustre-cold)', copper:'No', field:'import_cold', cold:true},
+    {key:'lustre_warm', label:'No-Copper warm', color:'var(--lustre-warm)', copper:'No', field:'import_warm', cold:false},
+  ],
+  reg: [
+    {key:'reg', label:'Registration median', color:'var(--reg)', copper:'Yes', field:'reg_median', cold:false},
+  ],
+  rpc: [
+    {key:'rpc', label:'First RPC median', color:'var(--rpc)', copper:'Yes', field:'rpc_median', cold:false},
+  ],
+};
+
+const enabled = {};
+Object.values(SERIES).flat().forEach(s=>enabled[s.key]=true);
+
+const metricSel=document.getElementById('metric');
+const yscaleSel=document.getElementById('yscale');
+const coldaggSel=document.getElementById('coldagg');
+const togglesEl=document.getElementById('toggles');
+const tt=document.getElementById('tt');
+
+function median(a){if(!a.length)return null;const s=[...a].sort((x,y)=>x-y);const m=s.length>>1;return s.length%2?s[m]:(s[m-1]+s[m])/2;}
+
+function buildToggles(){
+  const metric=metricSel.value;
+  togglesEl.innerHTML='';
+  SERIES[metric].forEach(s=>{
+    const chip=document.createElement('div');
+    chip.className='chip'+(enabled[s.key]?'':' off');
+    chip.innerHTML=`<span class="sw" style="background:${s.color}"></span>${s.label}`;
+    chip.onclick=()=>{enabled[s.key]=!enabled[s.key];chip.classList.toggle('off');draw();};
+    togglesEl.appendChild(chip);
+  });
+}
+
+function draw(){
+  const metric=metricSel.value;
+  const useLog=yscaleSel.value==='log';
+  const coldAgg=coldaggSel.value;
+  const svg=document.getElementById('chart');
+  const W=960,H=460,m={l:64,r:20,t:20,b:52};
+  const pw=W-m.l-m.r, ph=H-m.t-m.b;
+
+  const series=SERIES[metric].filter(s=>enabled[s.key]);
+  // gather points
+  const allNodes=[...new Set(DATA.map(d=>d.nodes))].sort((a,b)=>a-b);
+  let pts=[];
+  series.forEach(s=>{
+    DATA.filter(d=>d.copper===s.copper && d[s.field]!=null).forEach(d=>{
+      pts.push({s, nodes:d.nodes, v:d[s.field]});
+    });
+  });
+  if(!pts.length){svg.innerHTML=`<text x="${W/2}" y="${H/2}" fill="#8b98a5" text-anchor="middle">No data for this selection</text>`;return;}
+
+  const vals=pts.map(p=>p.v);
+  let vmin=Math.min(...vals), vmax=Math.max(...vals);
+  if(useLog){vmin=Math.max(0.01,vmin);}
+  else{vmin=Math.min(vmin,0);} // linear anchors at 0 for time
+  const pad=(vmax-vmin)*0.08; vmax+=pad;
+
+  const xIdx=n=>allNodes.indexOf(n);
+  const xspan=Math.max(1,allNodes.length-1);
+  const X=n=>m.l+(xIdx(n)/xspan)*pw;
+  const Y=v=>{
+    if(useLog){const lo=Math.log10(vmin),hi=Math.log10(vmax);return m.t+ph-((Math.log10(Math.max(v,vmin))-lo)/(hi-lo))*ph;}
+    return m.t+ph-((v-vmin)/(vmax-vmin))*ph;
+  };
+
+  let s='';
+  // axes
+  s+=`<line x1="${m.l}" y1="${m.t}" x2="${m.l}" y2="${m.t+ph}" stroke="#2b3540"/>`;
+  s+=`<line x1="${m.l}" y1="${m.t+ph}" x2="${m.l+pw}" y2="${m.t+ph}" stroke="#2b3540"/>`;
+  // y ticks
+  const ticks=6;
+  for(let i=0;i<=ticks;i++){
+    let v;
+    if(useLog){const lo=Math.log10(vmin),hi=Math.log10(vmax);v=Math.pow(10,lo+(hi-lo)*i/ticks);}
+    else{v=vmin+(vmax-vmin)*i/ticks;}
+    const y=Y(v);
+    s+=`<line x1="${m.l}" y1="${y}" x2="${m.l+pw}" y2="${y}" stroke="#1f2730"/>`;
+    s+=`<text x="${m.l-8}" y="${y+3}" fill="#8b98a5" font-size="10" text-anchor="end">${v>=10?v.toFixed(0):v.toFixed(2)}</text>`;
+  }
+  // x ticks
+  allNodes.forEach(n=>{
+    s+=`<text x="${X(n)}" y="${m.t+ph+16}" fill="#8b98a5" font-size="10" text-anchor="middle">${n}</text>`;
+  });
+  s+=`<text x="${m.l+pw/2}" y="${H-8}" fill="#8b98a5" font-size="11" text-anchor="middle">Nodes</text>`;
+  const ylab = metric==='import'?'Seconds':(metric==='reg'?'Registration (s)':'First RPC (s)');
+  s+=`<text x="16" y="${m.t+ph/2}" fill="#8b98a5" font-size="11" text-anchor="middle" transform="rotate(-90 16 ${m.t+ph/2})">${ylab}</text>`;
+
+  // scatter
+  pts.forEach(p=>{
+    const jitter=(Math.random()-0.5)*10;
+    s+=`<circle cx="${X(p.nodes)+jitter}" cy="${Y(p.v)}" r="3.2" fill="${p.s.color}" opacity="0.55"
+        data-tip="${p.s.label} | ${p.nodes} nodes | ${p.v.toFixed(3)}s"/>`;
+  });
+
+  // median (or max for cold) lines
+  series.forEach(sr=>{
+    const line=[];
+    allNodes.forEach(n=>{
+      const cell=DATA.filter(d=>d.copper===sr.copper && d.nodes===n && d[sr.field]!=null).map(d=>d[sr.field]);
+      if(!cell.length)return;
+      const agg = (sr.cold && coldAgg==='max') ? Math.max(...cell) : median(cell);
+      line.push({n,agg});
+    });
+    if(line.length>1){
+      let d='';line.forEach((pt,i)=>d+=(i?'L':'M')+X(pt.n)+' '+Y(pt.agg)+' ');
+      s+=`<path d="${d}" fill="none" stroke="${sr.color}" stroke-width="2"/>`;
+    }
+    line.forEach(pt=>{
+      s+=`<circle cx="${X(pt.n)}" cy="${Y(pt.agg)}" r="4.5" fill="${sr.color}" stroke="#0f1419" stroke-width="1.5"
+          data-tip="${sr.label} ${(sr.cold&&coldAgg==='max')?'MAX':'median'} | ${pt.n} nodes | ${pt.agg.toFixed(3)}s"/>`;
+    });
+  });
+
+  svg.innerHTML=s;
+
+  svg.querySelectorAll('[data-tip]').forEach(el=>{
+    el.addEventListener('mousemove',e=>{
+      tt.textContent=el.getAttribute('data-tip');
+      tt.style.left=(e.clientX+12)+'px';tt.style.top=(e.clientY+12)+'px';tt.style.opacity=1;
+    });
+    el.addEventListener('mouseleave',()=>tt.style.opacity=0);
+  });
+
+  buildSummary(metric);
+}
+
+function buildSummary(metric){
+  const tbl=document.getElementById('summary');
+  const allNodes=[...new Set(DATA.map(d=>d.nodes))].sort((a,b)=>a-b);
+  const cols = metric==='import'
+    ? [['Copper cold','Yes','import_cold'],['Copper warm','Yes','import_warm'],['No-Cu cold','No','import_cold'],['No-Cu warm','No','import_warm']]
+    : metric==='reg'
+      ? [['Reg median','Yes','reg_median']]
+      : [['RPC median','Yes','rpc_median']];
+  let h='<tr><th class="l">Nodes</th><th>reps</th>'+cols.map(c=>`<th>${c[0]}</th>`).join('')+'</tr>';
+  allNodes.forEach(n=>{
+    const anyReps = DATA.filter(d=>d.nodes===n).length;
+    h+=`<tr><td class="l">${n}</td><td>${anyReps}</td>`;
+    cols.forEach(c=>{
+      const cell=DATA.filter(d=>d.copper===c[1]&&d.nodes===n&&d[c[2]]!=null).map(d=>d[c[2]]);
+      h+=`<td>${cell.length?median(cell).toFixed(2):'&mdash;'}</td>`;
+    });
+    h+='</tr>';
+  });
+  tbl.innerHTML=h;
+}
+
+metricSel.onchange=()=>{buildToggles();draw();};
+yscaleSel.onchange=draw;
+coldaggSel.onchange=draw;
+document.getElementById('loadbtn').onclick=()=>{
+  const more=parseRows(document.getElementById('pastebox').value);
+  DATA=DATA.concat(more);draw();
+};
+document.getElementById('replacebtn').onclick=()=>{
+  DATA=parseRows(document.getElementById('pastebox').value);draw();
+};
+
+buildToggles();
+draw();
+</script>
+</body>
+</html>

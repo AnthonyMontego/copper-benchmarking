@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Places365 Throughput vs Nodes</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#1a2129; --line:#2b3540; --grid:#1f2730;
+    --ink:#e6edf3; --dim:#8b98a5;
+    --cc:#e07b39;  /* copper cold */
+    --cw:#f2c078;  /* copper warm */
+    --lc:#3d7fd6;  /* lustre cold */
+    --lw:#8fc0f0;  /* lustre warm */
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;padding:22px;background:var(--bg);color:var(--ink);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}
+  h1{font-size:19px;margin:0 0 2px;}
+  .sub{color:var(--dim);font-size:12px;margin:0 0 16px;}
+  .controls{display:flex;flex-wrap:wrap;gap:16px;align-items:center;
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin-bottom:16px;}
+  .ctl{display:flex;flex-direction:column;gap:4px;}
+  label.cap{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;}
+  select{background:#0c1116;border:1px solid var(--line);color:var(--ink);border-radius:5px;padding:5px 9px;font-size:13px;}
+  .series-toggles{display:flex;flex-wrap:wrap;gap:10px;}
+  .chip{display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;padding:4px 8px;
+    border:1px solid var(--line);border-radius:5px;background:#0c1116;user-select:none;}
+  .chip.off{opacity:.33;}
+  .sw{width:11px;height:11px;border-radius:2px;}
+  .chk{font-size:12px;color:var(--dim);display:flex;align-items:center;gap:6px;cursor:pointer;}
+  .chart-wrap{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:16px;}
+  svg{width:100%;max-width:900px;display:block;}
+  .tt{position:fixed;pointer-events:none;background:#0c1116;border:1px solid var(--line);
+    border-radius:6px;padding:6px 9px;font-size:12px;opacity:0;transition:opacity .08s;z-index:10;}
+  table{border-collapse:collapse;width:100%;max-width:900px;font-size:12px;}
+  th,td{border:1px solid var(--line);padding:4px 8px;text-align:right;}
+  th{background:var(--panel);color:var(--dim);}
+  td.l,th.l{text-align:left;}
+  .flag{color:var(--cc);}
+</style>
+</head>
+<body>
+  <h1>Places365 Dataset: Throughput vs Node Count</h1>
+  <p class="sub">Cold (first read) vs warm (re-read) throughput, Copper vs Lustre. The warm/cold gap is the caching benefit; no epoch model.</p>
+
+  <div class="controls">
+    <div class="ctl">
+      <label class="cap">Y axis</label>
+      <select id="yscale"><option value="log">Log (img/s)</option><option value="linear">Linear (img/s)</option></select>
+    </div>
+    <div class="ctl" style="flex:1;">
+      <label class="cap">Series</label>
+      <div class="series-toggles" id="toggles"></div>
+    </div>
+
+  </div>
+
+  <div class="chart-wrap"><svg id="chart" viewBox="0 0 900 460"></svg></div>
+
+  <div class="chart-wrap">
+    <div class="l" style="color:var(--dim);font-size:12px;margin-bottom:6px;">Throughput (images/s)</div>
+    <table id="tbl"></table>
+  </div>
+
+<div class="tt" id="tt"></div>
+<script>
+// nodes, copper(Yes/No), cold img/s (E1), warm img/s (E2)
+const D=[
+ {n:1,cu:'No', cold:94.476,  warm:1395.791},
+ {n:1,cu:'Yes',cold:26.897,  warm:2403.371},
+ {n:2,cu:'No', cold:644.201, warm:1645.875},
+ {n:2,cu:'Yes',cold:20.75,   warm:4657.339},
+ {n:4,cu:'No', cold:1769.359,warm:4027.229},
+ {n:4,cu:'Yes',cold:18.895,  warm:9173.414},
+ {n:8,cu:'No', cold:5103.612,warm:11526.145},
+ {n:8,cu:'Yes',cold:64.666,  warm:16825.658},
+];
+const SERIES=[
+ {key:'cu_cold',label:'Copper cold',color:'var(--cc)',cu:'Yes',fld:'cold',dash:'6 4'},
+ {key:'cu_warm',label:'Copper warm',color:'var(--cw)',cu:'Yes',fld:'warm',dash:''},
+ {key:'lu_cold',label:'Lustre cold',color:'var(--lc)',cu:'No', fld:'cold',dash:'6 4'},
+ {key:'lu_warm',label:'Lustre warm',color:'var(--lw)',cu:'No', fld:'warm',dash:''},
+];
+const on={}; SERIES.forEach(s=>on[s.key]=true);
+const tog=document.getElementById('toggles');
+SERIES.forEach(s=>{
+  const c=document.createElement('div');
+  c.className='chip'; c.innerHTML=`<span class="sw" style="background:${s.color}"></span>${s.label}`;
+  c.onclick=()=>{on[s.key]=!on[s.key];c.classList.toggle('off');draw();};
+  tog.appendChild(c);
+});
+document.getElementById('yscale').onchange=draw;
+const tt=document.getElementById('tt');
+
+function draw(){
+  const svg=document.getElementById('chart');
+  const useLog=document.getElementById('yscale').value==='log';
+  const W=900,H=460,m={l:64,r:120,t:20,b:48};
+  const pw=W-m.l-m.r, ph=H-m.t-m.b;
+  const nodes=[...new Set(D.map(d=>d.n))].sort((a,b)=>a-b);
+
+  const active=SERIES.filter(s=>on[s.key]);
+  let pts=[];
+  active.forEach(s=>D.filter(d=>d.cu===s.cu).forEach(d=>{
+    pts.push({s,n:d.n,v:d[s.fld],outlier:d.outlier&&s.fld==='warm'});
+  }));
+  if(!pts.length){svg.innerHTML='';return;}
+  const vals=pts.map(p=>p.v);
+  let vmin=Math.min(...vals),vmax=Math.max(...vals);
+  if(useLog)vmin=Math.max(1,vmin); else vmin=0;
+  vmax*=1.1;
+
+  const xi=n=>nodes.indexOf(n), xs=Math.max(1,nodes.length-1);
+  const X=n=>m.l+(xi(n)/xs)*pw;
+  const Y=v=>useLog
+    ?m.t+ph-((Math.log10(Math.max(v,vmin))-Math.log10(vmin))/(Math.log10(vmax)-Math.log10(vmin)))*ph
+    :m.t+ph-((v-vmin)/(vmax-vmin))*ph;
+
+  let s='';
+  s+=`<line x1="${m.l}" y1="${m.t}" x2="${m.l}" y2="${m.t+ph}" stroke="#2b3540"/>`;
+  s+=`<line x1="${m.l}" y1="${m.t+ph}" x2="${m.l+pw}" y2="${m.t+ph}" stroke="#2b3540"/>`;
+  const ticks=6;
+  for(let i=0;i<=ticks;i++){
+    let v; if(useLog){const lo=Math.log10(vmin),hi=Math.log10(vmax);v=Math.pow(10,lo+(hi-lo)*i/ticks);}
+    else v=vmin+(vmax-vmin)*i/ticks;
+    const y=Y(v);
+    s+=`<line x1="${m.l}" y1="${y}" x2="${m.l+pw}" y2="${y}" stroke="#1f2730"/>`;
+    s+=`<text x="${m.l-8}" y="${y+3}" fill="#8b98a5" font-size="10" text-anchor="end">${v>=1000?(v/1000).toFixed(1)+'k':v.toFixed(0)}</text>`;
+  }
+  nodes.forEach(n=>s+=`<text x="${X(n)}" y="${m.t+ph+16}" fill="#8b98a5" font-size="10" text-anchor="middle">${n}</text>`);
+  s+=`<text x="${m.l+pw/2}" y="${H-8}" fill="#8b98a5" font-size="11" text-anchor="middle">Nodes</text>`;
+  s+=`<text x="16" y="${m.t+ph/2}" fill="#8b98a5" font-size="11" text-anchor="middle" transform="rotate(-90 16 ${m.t+ph/2})">Images / sec</text>`;
+
+  active.forEach(sr=>{
+    const line=D.filter(d=>d.cu===sr.cu)
+      .map(d=>({n:d.n,v:d[sr.fld]})).sort((a,b)=>a.n-b.n);
+    if(line.length>1){
+      let dd=''; line.forEach((p,i)=>dd+=(i?'L':'M')+X(p.n)+' '+Y(p.v)+' ');
+      s+=`<path d="${dd}" fill="none" stroke="${sr.color}" stroke-width="2" stroke-dasharray="${sr.dash}"/>`;
+    }
+    // end label
+    if(line.length){const last=line[line.length-1];
+      s+=`<text x="${X(last.n)+8}" y="${Y(last.v)+3}" fill="${sr.color}" font-size="11">${sr.label}</text>`;}
+  });
+  pts.forEach(p=>{
+    s+=`<circle cx="${X(p.n)}" cy="${Y(p.v)}" r="${p.outlier?5:4}" fill="${p.s.color}"
+        ${p.outlier?'stroke="#e05555" stroke-width="2"':''}
+        data-tip="${p.s.label} | ${p.n} nodes | ${p.v.toFixed(1)} img/s${p.outlier?' (outlier)':''}"/>`;
+  });
+  svg.innerHTML=s;
+  svg.querySelectorAll('[data-tip]').forEach(el=>{
+    el.addEventListener('mousemove',e=>{tt.textContent=el.getAttribute('data-tip');
+      tt.style.left=(e.clientX+12)+'px';tt.style.top=(e.clientY+12)+'px';tt.style.opacity=1;});
+    el.addEventListener('mouseleave',()=>tt.style.opacity=0);
+  });
+  buildTbl();
+}
+function buildTbl(){
+  const nodes=[...new Set(D.map(d=>d.n))].sort((a,b)=>a-b);
+  let h='<tr><th class="l">Nodes</th><th>Copper cold</th><th>Copper warm</th><th>Lustre cold</th><th>Lustre warm</th></tr>';
+  nodes.forEach(n=>{
+    const cu=D.find(d=>d.n===n&&d.cu==='Yes'), lu=D.find(d=>d.n===n&&d.cu==='No');
+    const cw=cu?cu.warm.toFixed(0):'—';
+    h+=`<tr><td class="l">${n}</td><td>${cu?cu.cold.toFixed(0):'—'}</td><td>${cw}</td>`+
+       `<td>${lu?lu.cold.toFixed(0):'—'}</td><td>${lu?lu.warm.toFixed(0):'—'}</td></tr>`;
+  });
+  document.getElementById('tbl').innerHTML=h;
+}
+draw();
+</script>
+</body>
+</html>
