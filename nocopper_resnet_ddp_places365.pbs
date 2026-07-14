@@ -1,0 +1,32 @@
+#!/bin/bash -l
+#PBS -l select=8
+#PBS -l walltime=30:00
+#PBS -q debug-scaling
+#PBS -l filesystems=home:flare
+#PBS -A hpc-spectacle
+#PBS -o /flare/hpc-spectacle/logs/
+#PBS -e /flare/hpc-spectacle/logs/
+
+### ------------------------------------------------------------ ###
+### This program is designed to run with an altered resnet test, ###
+### Specifically shuffle=false. We made this choice in order to  ###
+### create a cold/warm run dynamic.				 ###
+### ------------------------------------------------------------ ###
+
+cd /flare/hpc-spectacle/week7
+
+NNODES=$(wc -l < "${PBS_NODEFILE}")
+RANKS_PER_NODE=12
+NRANKS=$((NNODES * RANKS_PER_NODE))
+JOBID=${PBS_JOBID%%.*}
+
+module load frameworks
+export CCL_PROCESS_LAUNCHER=pmix
+export CCL_ATL_TRANSPORT=mpi
+export ZE_FLAT_DEVICE_HIERARCHY=FLAT
+
+mpiexec -n ${NRANKS} -ppn ${RANKS_PER_NODE} \
+  --cpu-bind=list:4:56:9:61:14:66:19:71:20:74:25:79 \
+  --envall \
+  --pmi=pmix \
+  python3 -u resnet_ddp_xpu_places365.py /flare/hpc-spectacle/places365/data_256 --steps 5 --batch-size 64 --epochs 2

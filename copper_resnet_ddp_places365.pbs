@@ -1,0 +1,45 @@
+#!/bin/bash -l
+#PBS -l select=8
+#PBS -l walltime=30:00
+#PBS -q debug-scaling
+#PBS -l filesystems=home:flare
+#PBS -A hpc-spectacle
+#PBS -o /flare/hpc-spectacle/logs/
+#PBS -e /flare/hpc-spectacle/logs/
+
+### ------------------------------------------------------------ ###
+### This program is designed to run with an altered resnet test, ###
+### Specifically shuffle=false. We made this choice in order to  ###
+### create a cold/warm run dynamic. 				 ###
+### ------------------------------------------------------------ ###
+
+cd /flare/hpc-spectacle/week7
+
+NNODES=$(wc -l < "${PBS_NODEFILE}")
+RANKS_PER_NODE=12
+NRANKS=$((NNODES * RANKS_PER_NODE))
+JOBID=${PBS_JOBID%%.*}
+
+module load copper
+module load frameworks
+export COPPER_ROOT=/soft/daos/tools/copper_1_0_latest/copper
+COPPER_BUILD=${COPPER_ROOT}/build
+COPPER_MOUNT=/tmp/${USER}/copper_mount
+COPPER_LOGDIR=/flare/hpc-spectacle/copper-logs
+
+export ZE_FLAT_DEVICE_HIERARCHY=FLAT
+export CCL_PROCESS_LAUNCHER=pmix
+export CCL_ATL_TRANSPORT=mpi
+
+# --- launch copper ---
+"${COPPER_BUILD}/launch_copper_aurora.sh" -l 4 -d "${COPPER_LOGDIR}" -v "${COPPER_MOUNT}"
+
+# --- run resnet DDP through copper ---
+mpiexec -n ${NRANKS} -ppn ${RANKS_PER_NODE} \
+  --cpu-bind=list:4:56:9:61:14:66:19:71:20:74:25:79 \
+  --envall \
+  --pmi=pmix \
+  python3 -u resnet_ddp_xpu_places365.py /tmp/${USER}/copper_mount/lus/flare/projects/hpc-spectacle/places365/data_256 --batch-size 64 --steps 5 --epochs 2
+
+# --- stop copper ---
+"${COPPER_BUILD}/stop_copper_aurora.sh" -d "${COPPER_LOGDIR}" -v "${COPPER_MOUNT}"

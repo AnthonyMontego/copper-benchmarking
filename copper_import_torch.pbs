@@ -1,0 +1,90 @@
+#!/bin/bash -l
+#PBS -l select=512
+#PBS -l walltime=15:00
+#PBS -q prod
+#PBS -l filesystems=home:flare
+#PBS -A hpc-spectacle
+#PBS -o /flare/hpc-spectacle/logs/
+#PBS -e /flare/hpc-spectacle/logs/
+
+# ============================================================
+# NO-COPPER cold/warm import-torch timing  (baseline sibling)
+#
+# Mirror of copper_torch_coldwarm.pbs, but:
+#   - Copper is NOT launched (module loaded only for its Python 3.12).
+#   - PYTHONPATH points at the REAL package dir on Lustre (no mount).
+#   - No registration / first-RPC (those are copper-only) -> null.
+#   - Copper column = No.
+#
+# COLD = first import (OS page cache cold), WARM = second import
+#   (page cache warm). For multiple COLD samples, SUBMIT MULTIPLE
+#   TIMES, SPACED OUT (nodes retain cache). Do NOT loop inside one job.
+#
+# Vary node count by changing  #PBS -l select=N  and resubmitting.
+# ============================================================
+
+cd /flare/hpc-spectacle/week5/
+
+# --- geometry ---
+NNODES=$(wc -l < "${PBS_NODEFILE}")
+RANKS_PER_NODE=12
+NRANKS=$((NNODES * RANKS_PER_NODE))
+JOBID=${PBS_JOBID%%.*}
+
+# --- copper module loaded ONLY for its Python 3.12 (NOT launched) ---
+module load copper
+
+# --- custom torch on raw Lustre (NOT through any copper mount) ---
+CUSTOM_PKG=/flare/hpc-spectacle/lus_custom_pip_env
+
+# --- result output (shared CSV with the copper sibling) ---
+RESULT_DIR=/flare/hpc-spectacle/copper-logs/coldwarm
+mkdir -p "${RESULT_DIR}"
+RESULT_CSV=${RESULT_DIR}/coldwarm_results.csv
+RUN_LOG=${RESULT_DIR}/coldwarm_nocopper_${NNODES}nodes_${JOBID}.txt
+
+echo "=== No-copper cold/warm timing run ===" | tee "${RUN_LOG}"
+echo "nodes=${NNODES} ranks=${NRANKS} jobid=${JOBID} date=$(date '+%Y-%m-%d %H:%M:%S')" | tee -a "${RUN_LOG}"
+echo "" | tee -a "${RUN_LOG}"
+
+# --- sanity: torch present at the raw package dir? ---
+echo "=== package check ===" | tee -a "${RUN_LOG}"
+ls "${CUSTOM_PKG}" 2>&1 | grep -q torch && echo "torch present at ${CUSTOM_PKG}" | tee -a "${RUN_LOG}" \
+  || echo "WARNING: no torch at package path" | tee -a "${RUN_LOG}"
+echo "" | tee -a "${RUN_LOG}"
+
+# --- COLD run: first import, page cache cold. Time the whole mpirun. ---
+echo "=== COLD run ===" | tee -a "${RUN_LOG}"
+COLD_RAW=$( { /usr/bin/time -f "%e" \
+  mpirun -np ${NRANKS} -ppn ${RANKS_PER_NODE} \
+    --cpu-bind=list:4:56:9:61:14:66:19:71:20:74:25:79 --genvall \
+    --genv=PYTHONPATH="${CUSTOM_PKG}:${PYTHONPATH}" \
+    python3 -c "import torch" ; } 2>&1 )
+COLD_S=$(echo "${COLD_RAW}" | tail -n 1)
+echo "cold mpirun output: ${COLD_RAW}" | tee -a "${RUN_LOG}"
+echo "" | tee -a "${RUN_LOG}"
+
+# --- WARM run: second import, page cache warm (same nodes) ---
+echo "=== WARM run ===" | tee -a "${RUN_LOG}"
+WARM_RAW=$( { /usr/bin/time -f "%e" \
+  mpirun -np ${NRANKS} -ppn ${RANKS_PER_NODE} \
+    --cpu-bind=list:4:56:9:61:14:66:19:71:20:74:25:79 --genvall \
+    --genv=PYTHONPATH="${CUSTOM_PKG}:${PYTHONPATH}" \
+    python3 -c "import torch" ; } 2>&1 )
+WARM_S=$(echo "${WARM_RAW}" | tail -n 1)
+echo "warm mpirun output: ${WARM_RAW}" | tee -a "${RUN_LOG}"
+echo "" | tee -a "${RUN_LOG}"
+
+# ============================================================
+# Write one CSV row. No copper -> registration/RPC are null.
+# Shares the header/columns of the copper sibling.
+# ============================================================
+if [ ! -f "${RESULT_CSV}" ]; then
+  echo "nodes,ranks,copper,jobid,timestamp,import_cold,import_warm,reg_min,reg_median,reg_max,rpc_min,rpc_median,rpc_max" > "${RESULT_CSV}"
+fi
+
+echo "${NNODES},${NRANKS},No,${JOBID},$(date '+%Y-%m-%d %H:%M:%S'),${COLD_S},${WARM_S},null,null,null,null,null,null" >> "${RESULT_CSV}"
+
+echo "=== row written -> ${RESULT_CSV} ===" | tee -a "${RUN_LOG}"
+echo "cold=${COLD_S}s  warm=${WARM_S}s  (no copper: reg/rpc null)" | tee -a "${RUN_LOG}"
+
