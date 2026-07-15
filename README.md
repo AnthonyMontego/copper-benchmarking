@@ -98,14 +98,12 @@ frameworks stack so the build matches Aurora's:
 
 ```bash
 module load frameworks
-pip install --target=/flare/hpc-spectacle/lus_custom_pip_env --no-deps \
-  <VERIFY exact versions/index — e.g. torch==2.10.0+xpu torchvision==0.25.0+xpu \
-   intel-extension-for-pytorch mpi4py>
+pip install --target=/flare/hpc-spectacle/lus_custom_pip_env \
+  torch==2.10.0+xpu torchvision==0.25.0+xpu torchaudio==2.11.0+xpu \
+  intel-extension-for-pytorch==2.10.10 mpi4py==4.1.1
 ```
 
-Contains: torch 2.10.0+xpu, torchvision 0.25.0+xpu, IPEX, mpi4py. The torch
-build must match the frameworks torch git hash; installing via the frameworks
-pip with `--target`/`--no-deps` ensures this.
+Installed against the frameworks module's pip (which is configured for Aurora's XPU package index) with --target so the package tree lives on Lustre. Exact versions (from the install): torch 2.10.0+xpu, torchvision 0.25.0+xpu, torchaudio 2.11.0+xpu, IPEX 2.10.10, mpi4py 4.1.1. The install resolves the full Intel oneAPI runtime dependency tree (dpcpp, MKL, oneCCL, etc.) — do not use --no-deps.
 
 ### Places365 dataset (`resnet/` workload only)
 
