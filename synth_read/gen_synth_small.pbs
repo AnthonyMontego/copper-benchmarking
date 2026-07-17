@@ -1,0 +1,28 @@
+#!/bin/bash -l
+#PBS -l select=1
+#PBS -l walltime=30:00
+#PBS -q debug
+#PBS -l filesystems=home:flare
+#PBS -A hpc-spectacle
+#PBS -o /flare/hpc-spectacle/logs/
+#PBS -e /flare/hpc-spectacle/logs/
+
+# Generate the five "easy" granularity dirs (10MB down to 64KB), each 10GB
+# total, sharded. ~218K files combined -- minutes on a compute node.
+# The 4KB/2.6M-file dir is generated separately (gen_synth_4kb.pbs).
+
+cd /flare/hpc-spectacle/synth_read/
+source ./gen_synth_core.sh
+
+BASE=/flare/hpc-spectacle/synth
+
+echo "=== generating small granularity dirs (10GB each) ==="
+gen_one 10M "${BASE}/10M_10GB"
+gen_one 4M  "${BASE}/4M_10GB"
+gen_one 1M  "${BASE}/1M_10GB"
+gen_one 256K "${BASE}/256K_10GB"
+gen_one 64K "${BASE}/64K_10GB"
+
+echo "=== done. inode/space check: ==="
+lfs quota -h -g hpc-spectacle /flare | tail -3
+

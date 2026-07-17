@@ -1,0 +1,68 @@
+#!/bin/bash -l
+#PBS -l select=512
+#PBS -l walltime=30:00
+#PBS -q prod
+#PBS -l filesystems=home:flare
+#PBS -A hpc-spectacle
+#PBS -o /flare/hpc-spectacle/logs/
+#PBS -e /flare/hpc-spectacle/logs/
+
+# Synthetic redundant-read cold/warm timing, NO copper (baseline).
+# Reads FILESET directly from Lustre. Matched sibling to copper_synth_read.pbs;
+# differs ONLY in the copper dimension (raw path, no launch/mount/harvest).
+# Loads copper module for python3 only (not launched).
+#
+# Set FILESET to a pre-generated dir. Vary node count via #PBS select.
+# Submit multiple times (spaced) for multiple COLD samples.
+# Available experiments in /synth/: 10M_10GB  4M_10GB  1M_10GB  256K_10GB  64K_10GB  4K_10GB
+# Use file size depending on experiment: 10M - 1024 | 4M - 2560 | 1M - 10240 | 256K - 40960 | 64K - 163840 | 4K - 2621440
+
+cd /flare/hpc-spectacle/synth_read/
+
+FILESET=/flare/hpc-spectacle/synth/1M_10GB      # <-- set per experiment cell
+FILE_SIZE=1M
+FILE_COUNT=10240
+
+NNODES=$(wc -l < "${PBS_NODEFILE}")
+RANKS_PER_NODE=12
+NRANKS=$((NNODES * RANKS_PER_NODE))
+JOBID=${PBS_JOBID%%.*}
+TOTAL_REQ=$((FILE_COUNT * NRANKS))
+
+module load copper   # for python3 interpreter only; copper NOT launched
+
+RESULT_DIR=/flare/hpc-spectacle/copper-logs/synth_read
+mkdir -p "${RESULT_DIR}"
+RESULT_CSV=${RESULT_DIR}/synth_read_results.csv
+RUN_LOG=${RESULT_DIR}/nocopper_${FILE_SIZE}_${FILE_COUNT}f_${NNODES}n_${JOBID}.txt
+
+echo "=== synth read (nocopper) ===" | tee "${RUN_LOG}"
+echo "nodes=${NNODES} ranks=${NRANKS} size=${FILE_SIZE} count=${FILE_COUNT} total_req=${TOTAL_REQ} jobid=${JOBID} date=$(date '+%Y-%m-%d %H:%M:%S')" | tee -a "${RUN_LOG}"
+
+echo "=== fileset check (should list a shard dir) ===" | tee -a "${RUN_LOG}"
+ls "${FILESET}" 2>&1 | head -3 | tee -a "${RUN_LOG}"
+
+echo "=== COLD ===" | tee -a "${RUN_LOG}"
+COLD_RAW=$( { /usr/bin/time -f "%e" \
+  mpirun -np ${NRANKS} -ppn ${RANKS_PER_NODE} \
+    --cpu-bind=list:4:56:9:61:14:66:19:71:20:74:25:79 --genvall \
+    python3 -u read_synthetic.py "${FILESET}" ; } 2>&1 )
+COLD_S=$(echo "${COLD_RAW}" | tail -n 1)
+echo "${COLD_RAW}" | tee -a "${RUN_LOG}"
+
+echo "=== WARM ===" | tee -a "${RUN_LOG}"
+WARM_RAW=$( { /usr/bin/time -f "%e" \
+  mpirun -np ${NRANKS} -ppn ${RANKS_PER_NODE} \
+    --cpu-bind=list:4:56:9:61:14:66:19:71:20:74:25:79 --genvall \
+    python3 -u read_synthetic.py "${FILESET}" ; } 2>&1 )
+WARM_S=$(echo "${WARM_RAW}" | tail -n 1)
+echo "${WARM_RAW}" | tee -a "${RUN_LOG}"
+
+if [ ! -f "${RESULT_CSV}" ]; then
+  echo "nodes,ranks,file_size,file_count,total_req,copper,jobid,timestamp,read_cold,read_warm,reg_min,reg_median,reg_max,rpc_min,rpc_median,rpc_max" > "${RESULT_CSV}"
+fi
+echo "${NNODES},${NRANKS},${FILE_SIZE},${FILE_COUNT},${TOTAL_REQ},No,${JOBID},$(date '+%Y-%m-%d %H:%M:%S'),${COLD_S},${WARM_S},null,null,null,null,null,null" >> "${RESULT_CSV}"
+
+echo "" | tee -a "${RUN_LOG}"
+echo "=== SUMMARY === cold=${COLD_S} warm=${WARM_S} total_req=${TOTAL_REQ} -> ${RESULT_CSV}" | tee -a "${RUN_LOG}"
+

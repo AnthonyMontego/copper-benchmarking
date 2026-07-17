@@ -1,0 +1,27 @@
+#!/bin/bash -l
+#PBS -l select=1
+#PBS -l walltime=60:00
+#PBS -q debug
+#PBS -l filesystems=home:flare
+#PBS -A hpc-spectacle
+#PBS -o /flare/hpc-spectacle/logs/
+#PBS -e /flare/hpc-spectacle/logs/
+
+# Generate ONLY the 4KB dir: 10GB total = ~2.62M files, sharded 1000/dir
+# (~2620 subdirs). This is the heavy one -- serial creation of 2.6M tiny
+# files takes ~30-90 min, hence its own job with 90 min walltime.
+# Resumable: rerun continues where it left off if it doesn't finish.
+
+cd /flare/hpc-spectacle/synth_read/
+source ./gen_synth_core.sh
+
+BASE=/flare/hpc-spectacle/synth
+
+echo "=== generating 4KB dir (10GB total, ~2.62M files) ==="
+echo "start: $(date '+%Y-%m-%d %H:%M:%S')"
+gen_one 4K "${BASE}/4K_10GB"
+echo "end:   $(date '+%Y-%m-%d %H:%M:%S')"
+
+echo "=== done. inode/space check: ==="
+lfs quota -h -g hpc-spectacle /flare | tail -3
+

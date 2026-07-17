@@ -1,0 +1,4 @@
+nodes,ranks,file_size,file_count,total_req,copper,jobid,timestamp,read_cold,read_warm,reg_min,reg_median,reg_max,rpc_min,rpc_median,rpc_max
+2,24,10M,1024,24576,Yes,8676212,2026-07-16 16:05:48,282.66,84.90,0.079,0.086,0.092,10.723,10.723,10.723
+512,6144,10M,1024,6291456,No,8676785,2026-07-17 13:53:47,89.61,34.65,null,null,null,null,null,null
+512,6144,10M,1024,6291456,Yes,8676781,2026-07-17 13:22:42,237.94,73.30,0.084,0.091,0.268,10.802,14.058,17.382

@@ -1,0 +1,45 @@
+#!/bin/bash -l
+#PBS -l select=2
+#PBS -l walltime=30:00
+#PBS -q debug-scaling
+#PBS -l filesystems=home:flare
+#PBS -A hpc-spectacle
+#PBS -o /flare/hpc-spectacle/logs/
+#PBS -e /flare/hpc-spectacle/logs/
+
+# Parallel generator: splits shards across all ranks (~linear speedup).
+# Resumable -- skips files that already exist, so safe to rerun / continue.
+# Generates the dirs listed in TARGETS below (size_bytes:dest pairs).
+#
+# 2 nodes x 12 = 24 ranks. Serial was ~100 files/s; 24 ranks ~ ~2400 files/s,
+# so 4KB's 2.62M files ~ ~18 min (vs ~7 hr serial). Scale nodes up for more.
+
+cd /flare/hpc-spectacle/synth_read/
+
+module load frameworks   # for python3 + mpi4py
+
+NNODES=$(wc -l < "${PBS_NODEFILE}")
+RANKS_PER_NODE=12
+NRANKS=$((NNODES * RANKS_PER_NODE))
+BASE=/flare/hpc-spectacle/synth
+
+# size_in_bytes : destination_dir  (add/remove lines as needed)
+gen_dir () {
+  local SIZE_B="$1" DEST="$2"
+  echo "=== generating ${DEST} (size=${SIZE_B}B) on ${NRANKS} ranks: $(date '+%H:%M:%S') ==="
+  mpiexec -n ${NRANKS} -ppn ${RANKS_PER_NODE} \
+    --cpu-bind=list:4:56:9:61:14:66:19:71:20:74:25:79 --genvall \
+    --pmi=pmix \
+    python3 -u gen_synth_parallel.py "${SIZE_B}" "${DEST}"
+  local n
+  n=$(find "${DEST}" -type f -name 'f_*.bin' | wc -l)
+  echo "=== ${DEST}: ${n} files present, $(date '+%H:%M:%S') ==="
+}
+
+# Finish 64K first (quick), then grind 4K. Both resumable.
+gen_dir 65536 "${BASE}/64K_10GB"
+gen_dir 4096  "${BASE}/4K_10GB"
+
+echo "=== final space/inode check ==="
+lfs quota -h -g hpc-spectacle /flare | tail -3
+

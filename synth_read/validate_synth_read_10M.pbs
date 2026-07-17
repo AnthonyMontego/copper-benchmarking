@@ -1,0 +1,99 @@
+#!/bin/bash -l
+#PBS -l select=2
+#PBS -l walltime=20:00
+#PBS -q debug-scaling
+#PBS -l filesystems=home:flare
+#PBS -A hpc-spectacle
+#PBS -o /flare/hpc-spectacle/logs/
+#PBS -e /flare/hpc-spectacle/logs/
+
+# 2-NODE VALIDATION of the synthetic read pipeline, WITH copper.
+# Uses the 10M dir (1024 files -> fastest read, smallest walltime).
+# Confirms: mount path resolves, recursive glob reads sharded dirs,
+# cold/warm both produce numbers, reg/RPC harvest, CSV write.
+# Once this passes, scale to the full sweep at 512 nodes.
+
+cd /flare/hpc-spectacle/synth_read/
+
+FILESET=/flare/hpc-spectacle/synth/10M_10GB
+FILE_SIZE=10M
+FILE_COUNT=1024
+
+NNODES=$(wc -l < "${PBS_NODEFILE}")
+RANKS_PER_NODE=12
+NRANKS=$((NNODES * RANKS_PER_NODE))
+JOBID=${PBS_JOBID%%.*}
+TOTAL_REQ=$((FILE_COUNT * NRANKS))
+
+module load copper
+export COPPER_ROOT=/soft/daos/tools/copper_1_0_latest/copper
+COPPER_BUILD=${COPPER_ROOT}/build
+COPPER_MOUNT=/tmp/${USER}/copper_mount
+COPPER_LOGDIR=/flare/hpc-spectacle/copper-logs
+
+# /flare is a symlink to /lus/flare/projects; the mount mirrors the RESOLVED
+# path. Resolve it so the mount fileset path is correct (same as import-torch).
+FILESET_RESOLVED=$(readlink -f "${FILESET}")
+MOUNT_FILESET=${COPPER_MOUNT}${FILESET_RESOLVED}
+
+RESULT_DIR=/flare/hpc-spectacle/copper-logs/synth_read
+mkdir -p "${RESULT_DIR}"
+RESULT_CSV=${RESULT_DIR}/synth_read_results.csv
+RUN_LOG=${RESULT_DIR}/validate_copper_${FILE_SIZE}_${NNODES}n_${JOBID}.txt
+
+echo "=== synth read VALIDATION (copper) ===" | tee "${RUN_LOG}"
+echo "nodes=${NNODES} ranks=${NRANKS} size=${FILE_SIZE} count=${FILE_COUNT} total_req=${TOTAL_REQ} jobid=${JOBID}" | tee -a "${RUN_LOG}"
+echo "fileset (raw):      ${FILESET}" | tee -a "${RUN_LOG}"
+echo "fileset (resolved): ${FILESET_RESOLVED}" | tee -a "${RUN_LOG}"
+echo "mount fileset:      ${MOUNT_FILESET}" | tee -a "${RUN_LOG}"
+
+"${COPPER_BUILD}/launch_copper_aurora.sh" -l 4 -d "${COPPER_LOGDIR}" -v "${COPPER_MOUNT}"
+
+echo "=== mount check (should list a shard dir) ===" | tee -a "${RUN_LOG}"
+ls "${MOUNT_FILESET}" 2>&1 | head -3 | tee -a "${RUN_LOG}"
+
+echo "=== COLD ===" | tee -a "${RUN_LOG}"
+COLD_RAW=$( { /usr/bin/time -f "%e" \
+  mpirun -np ${NRANKS} -ppn ${RANKS_PER_NODE} \
+    --cpu-bind=list:4:56:9:61:14:66:19:71:20:74:25:79 --genvall \
+    python3 -u read_synthetic.py "${MOUNT_FILESET}" ; } 2>&1 )
+COLD_S=$(echo "${COLD_RAW}" | tail -n 1)
+echo "${COLD_RAW}" | tee -a "${RUN_LOG}"
+
+echo "=== WARM ===" | tee -a "${RUN_LOG}"
+WARM_RAW=$( { /usr/bin/time -f "%e" \
+  mpirun -np ${NRANKS} -ppn ${RANKS_PER_NODE} \
+    --cpu-bind=list:4:56:9:61:14:66:19:71:20:74:25:79 --genvall \
+    python3 -u read_synthetic.py "${MOUNT_FILESET}" ; } 2>&1 )
+WARM_S=$(echo "${WARM_RAW}" | tail -n 1)
+echo "${WARM_RAW}" | tee -a "${RUN_LOG}"
+
+"${COPPER_BUILD}/stop_copper_aurora.sh" -d "${COPPER_LOGDIR}" -v "${COPPER_MOUNT}"
+
+JOB_COPPER_LOGS=${COPPER_LOGDIR}/${JOBID}
+grep -rhn "provider registration completed after" "${JOB_COPPER_LOGS}" 2>/dev/null | tee -a "${RUN_LOG}"
+grep -rhn "first successful parent rpc_" "${JOB_COPPER_LOGS}" 2>/dev/null | tee -a "${RUN_LOG}"
+
+reduce () {
+  awk -v div="$1" '
+    { v=$1/div; a[n++]=v }
+    END { if(n==0){print "null null null"; exit}
+      for(i=0;i<n;i++)for(j=i+1;j<n;j++)if(a[j]<a[i]){t=a[i];a[i]=a[j];a[j]=t}
+      m=(n%2)?a[(n-1)/2]:(a[n/2-1]+a[n/2])/2
+      printf "%.3f %.3f %.3f", a[0], m, a[n-1] }'
+}
+read REG_MIN REG_MED REG_MAX < <(grep "provider registration completed after" "${RUN_LOG}" | sed -n 's/.*completed after \([0-9]*\) us.*/\1/p' | reduce 1000000)
+read RPC_MIN RPC_MED RPC_MAX < <(grep "first successful parent rpc_" "${RUN_LOG}" | sed -n 's/.*completed after \([0-9]*\) us .*/\1/p' | reduce 1000000)
+
+if [ ! -f "${RESULT_CSV}" ]; then
+  echo "nodes,ranks,file_size,file_count,total_req,copper,jobid,timestamp,read_cold,read_warm,reg_min,reg_median,reg_max,rpc_min,rpc_median,rpc_max" > "${RESULT_CSV}"
+fi
+echo "${NNODES},${NRANKS},${FILE_SIZE},${FILE_COUNT},${TOTAL_REQ},Yes,${JOBID},$(date '+%Y-%m-%d %H:%M:%S'),${COLD_S},${WARM_S},${REG_MIN},${REG_MED},${REG_MAX},${RPC_MIN},${RPC_MED},${RPC_MAX}" >> "${RESULT_CSV}"
+
+rm -rf "${JOB_COPPER_LOGS}"
+
+echo "" | tee -a "${RUN_LOG}"
+echo "=== VALIDATION SUMMARY ===" | tee -a "${RUN_LOG}"
+echo "cold=${COLD_S}s  warm=${WARM_S}s  reg_med=${REG_MED}s  rpc_med=${RPC_MED}s" | tee -a "${RUN_LOG}"
+echo "CHECK: cold should be > warm (cache populated); reg/rpc non-null; row in ${RESULT_CSV}" | tee -a "${RUN_LOG}"
+
